@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,12 +18,19 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
-/// Klien HTTP untuk backend ecommerce-api.
+/// Klien HTTP untuk backend ecommerce-api — APLIKASI STAFF ONLY.
 ///
 /// - Envelope respons: {success, message, data, error, meta}.
 /// - JWT access token (15 menit) dikirim sebagai Bearer; saat menerima 401,
 ///   token di-refresh sekali via /auth/refresh lalu request diulang.
 /// - Logout menghapus token lokal.
+/// - Base URL: utama https://api.alikmakanmie.my.id/api/v1. Bila request
+///   gagal total (DNS/timeout/tidak ada koneksi), otomatis fallback ke
+///   http://203.175.11.164:2150/api/v1 (IP VPS langsung) untuk sisa sesi.
+///   Override manual (layar Login > ikon server) mengunci satu URL.
+/// - Semua error transport diubah menjadi ApiException berpesan ramah —
+///   pemanggil UI TIDAK PERNAH menerima ClientException/SocketException
+///   mentah (itu penyebab "Unhandled Exception" di login 6 Nov 2026).
 class ApiClient {
   ApiClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
 
@@ -31,16 +39,58 @@ class ApiClient {
   String? _refreshToken;
   Future<bool>? _refreshing;
 
+  /// Base URL yang sedang dipakai (override manual / primary / fallback).
+  String _activeBaseUrl = AppConfig.apiBaseUrl;
+  String? _manualOverride;
+  bool _usingFallback = false;
+
   static const _kAccess = 'access_token';
   static const _kRefresh = 'refresh_token';
+  static const _kServerOverride = 'server_base_url';
 
-  String get baseUrl => AppConfig.apiBaseUrl;
+  static const _timeout = Duration(seconds: 20);
+
+  static const _noConnection = ApiException(
+    'Tidak bisa terhubung ke server. Periksa koneksi internet, lalu coba lagi.',
+  );
+
+  String get baseUrl => _activeBaseUrl;
+  String get primaryBaseUrl => AppConfig.apiBaseUrl;
+  String get fallbackBaseUrl => AppConfig.fallbackApiBaseUrl;
+  bool get isUsingFallback => _usingFallback;
+  bool get hasManualOverride => _manualOverride != null;
+  String? get manualOverride => _manualOverride;
   bool get hasToken => _accessToken != null && _accessToken!.isNotEmpty;
+
+  /// Muat token + override server tersimpan. Dipanggil sekali di main().
+  Future<void> init() async {
+    final prefs = await SharedPreferences.getInstance();
+    _manualOverride = prefs.getString(_kServerOverride);
+    _activeBaseUrl = _manualOverride ?? AppConfig.apiBaseUrl;
+    _usingFallback = false;
+    _accessToken = prefs.getString(_kAccess);
+    _refreshToken = prefs.getString(_kRefresh);
+  }
 
   Future<void> loadTokens() async {
     final prefs = await SharedPreferences.getInstance();
     _accessToken = prefs.getString(_kAccess);
     _refreshToken = prefs.getString(_kRefresh);
+  }
+
+  /// Kunci server ke satu URL (null/kosong = kembali ke URL utama).
+  Future<void> setServerOverride(String? url) async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = url?.trim();
+    if (v == null || v.isEmpty) {
+      _manualOverride = null;
+      await prefs.remove(_kServerOverride);
+    } else {
+      _manualOverride = v;
+      await prefs.setString(_kServerOverride, v);
+    }
+    _activeBaseUrl = _manualOverride ?? AppConfig.apiBaseUrl;
+    _usingFallback = false;
   }
 
   Future<void> saveTokens(String access, String refresh) async {
@@ -77,15 +127,21 @@ class ApiClient {
     return <String, dynamic>{'data': decoded};
   }
 
-  /// Satu request HTTP mentah (tanpa refresh otomatis).
-  Future<http.Response> _send(
+  bool _isTransportError(Object e) =>
+      e is SocketException ||
+      e is http.ClientException ||
+      e is TimeoutException;
+
+  /// Satu request HTTP mentah ke satu base URL (tanpa refresh/fallback).
+  Future<http.Response> _sendTo(
+    String base,
     String method,
     String path, {
     Map<String, dynamic>? body,
     Map<String, String>? query,
     bool auth = true,
   }) async {
-    final uri = Uri.parse('$baseUrl$path').replace(
+    final uri = Uri.parse('$base$path').replace(
       queryParameters: query?.isEmpty ?? true ? null : query,
     );
     final payload = body == null ? null : jsonEncode(body);
@@ -102,6 +158,51 @@ class ApiClient {
         return _http.delete(uri, headers: _headers(auth: auth));
       default:
         throw const ApiException('Metode HTTP tidak dikenal');
+    }
+  }
+
+  /// Request mentah + timeout + auto-fallback ke IP VPS bila base aktif
+  /// gagal total. Error transport selalu jadi ApiException ramah.
+  Future<http.Response> _send(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, String>? query,
+    bool auth = true,
+  }) async {
+    try {
+      return await _sendTo(
+        _activeBaseUrl,
+        method,
+        path,
+        body: body,
+        query: query,
+        auth: auth,
+      ).timeout(_timeout);
+    } catch (e) {
+      if (!_isTransportError(e)) rethrow;
+      // Fallback hanya bila tidak ada override manual dan base aktif
+      // bukan fallback itu sendiri.
+      if (_manualOverride == null &&
+          _activeBaseUrl != AppConfig.fallbackApiBaseUrl) {
+        try {
+          final res = await _sendTo(
+            AppConfig.fallbackApiBaseUrl,
+            method,
+            path,
+            body: body,
+            query: query,
+            auth: auth,
+          ).timeout(_timeout);
+          _activeBaseUrl = AppConfig.fallbackApiBaseUrl;
+          _usingFallback = true;
+          return res;
+        } catch (e2) {
+          if (_isTransportError(e2)) throw _noConnection;
+          rethrow;
+        }
+      }
+      throw _noConnection;
     }
   }
 
@@ -206,7 +307,7 @@ class ApiClient {
     );
   }
 
-  // ---------------- Auth ----------------
+  // ---------------- Auth (staff) ----------------
 
   Future<({String access, String refresh, User user})> login(
     String email,
@@ -230,26 +331,6 @@ class ApiClient {
     );
   }
 
-  Future<User> register(
-    String name,
-    String email,
-    String password,
-    String phone,
-  ) async {
-    final json = await requestJson('POST', '/auth/register', body: {
-      'name': name,
-      'email': email,
-      'password': password,
-      'phone': phone,
-    }, auth: false);
-    final data = _data(json);
-    final userJson = data['user'];
-    if (userJson is! Map<String, dynamic>) {
-      throw const ApiException('Registrasi gagal: data pengguna kosong');
-    }
-    return User.fromJson(userJson);
-  }
-
   Future<void> logout() async {
     final refresh = _refreshToken;
     try {
@@ -264,45 +345,14 @@ class ApiClient {
     }
   }
 
-  // ---------------- Profil & Alamat ----------------
+  // ---------------- Profil staf ----------------
 
   Future<User> getProfile() async {
     final json = await requestJson('GET', '/users/me');
     return User.fromJson(_data(json));
   }
 
-  Future<User> updateProfile({required String name, required String phone}) async {
-    final json = await requestJson('PUT', '/users/me', body: {
-      'name': name,
-      'phone': phone,
-    });
-    return User.fromJson(_data(json));
-  }
-
-  Future<List<Address>> listAddresses() async {
-    final json = await requestJson('GET', '/users/me/addresses');
-    return _dataList(json).map(Address.fromJson).toList();
-  }
-
-  Future<Address> createAddress(Address address) async {
-    final json = await requestJson(
-      'POST',
-      '/users/me/addresses',
-      body: address.toRequestJson(),
-    );
-    return Address.fromJson(_data(json));
-  }
-
-  Future<void> deleteAddress(String id) async {
-    await requestJson('DELETE', '/users/me/addresses/$id');
-  }
-
-  Future<Address> setDefaultAddress(String id) async {
-    final json = await requestJson('PUT', '/users/me/addresses/$id/default');
-    return Address.fromJson(_data(json));
-  }
-
-  // ---------------- Katalog ----------------
+  // ---------------- Katalog (menu) ----------------
 
   Future<List<Category>> listCategories() async {
     final json = await requestJson('GET', '/categories');
@@ -327,7 +377,8 @@ class ApiClient {
     }
     if (minPrice != null && minPrice > 0) query['min_price'] = '$minPrice';
     if (maxPrice != null && maxPrice > 0) query['max_price'] = '$maxPrice';
-    final json = await requestJson('GET', '/products', query: query, auth: false);
+    final json =
+        await requestJson('GET', '/products', query: query, auth: false);
     return _paged(json, Product.fromJson);
   }
 
@@ -336,128 +387,7 @@ class ApiClient {
     return Product.fromJson(_data(json));
   }
 
-  // ---------------- Keranjang ----------------
-
-  Future<Cart> getCart() async {
-    final json = await requestJson('GET', '/cart');
-    return Cart.fromJson(_data(json));
-  }
-
-  Future<CartItem> addToCart(String productId, int quantity) async {
-    final json = await requestJson('POST', '/cart/items', body: {
-      'product_id': productId,
-      'quantity': quantity,
-    });
-    return CartItem.fromJson(_data(json));
-  }
-
-  Future<void> updateCartQty(String itemId, int quantity) async {
-    await requestJson('PUT', '/cart/items/$itemId', body: {
-      'quantity': quantity,
-    });
-  }
-
-  Future<void> removeCartItem(String itemId) async {
-    await requestJson('DELETE', '/cart/items/$itemId');
-  }
-
-  // ---------------- Order ----------------
-
-  Future<Order> checkout({
-    required String addressId,
-    required String paymentMethod,
-    String notes = '',
-  }) async {
-    final json = await requestJson('POST', '/orders/checkout', body: {
-      'address_id': addressId,
-      'payment_method': paymentMethod,
-      'notes': notes,
-    });
-    return Order.fromJson(_data(json));
-  }
-
-  // ---------------- Guest Checkout (tanpa login) ----------------
-
-  /// Guest checkout publik (tanpa JWT).
-  /// POST /orders/guest-checkout — respons data: {order: {...}, payment: {...}}.
-  Future<Order> guestCheckout({
-    required List<GuestCheckoutItem> items,
-    required String customerName,
-    String? customerPhone,
-    required String orderType, // dine_in | takeaway | delivery
-    String? tableNumber,
-    String? notes,
-    Map<String, String>? deliveryAddress,
-    required String paymentMethod, // qris | va
-  }) async {
-    final body = <String, dynamic>{
-      'items': items.map((i) => i.toJson()).toList(),
-      'customer_name': customerName,
-      'order_type': orderType,
-      'payment_method': paymentMethod,
-    };
-    if (customerPhone != null && customerPhone.isNotEmpty) {
-      body['customer_phone'] = customerPhone;
-    }
-    if (tableNumber != null && tableNumber.isNotEmpty) {
-      body['table_number'] = tableNumber;
-    }
-    if (notes != null && notes.isNotEmpty) body['notes'] = notes;
-    if (deliveryAddress != null) body['delivery_address'] = deliveryAddress;
-    final json = await requestJson(
-      'POST',
-      '/orders/guest-checkout',
-      body: body,
-      auth: false,
-    );
-    return Order.fromJson(_guestOrderJson(_data(json)));
-  }
-
-  /// Lacak order tamu publik (tanpa JWT).
-  /// GET /orders/track/:order_number — respons data: order (+ items, total).
-  Future<Order> trackOrder(String orderNumber) async {
-    final json = await requestJson(
-      'GET',
-      '/orders/track/${Uri.encodeComponent(orderNumber)}',
-      auth: false,
-    );
-    return Order.fromJson(_guestOrderJson(_data(json)));
-  }
-
-  /// Normalisasi respons guest: data bisa berupa order langsung,
-  /// atau {order: {...}, payment: {...}} (payment dipisah).
-  Map<String, dynamic> _guestOrderJson(Map<String, dynamic> data) {
-    final orderJson = data['order'];
-    if (orderJson is Map<String, dynamic>) {
-      final merged = Map<String, dynamic>.from(orderJson);
-      final payment = data['payment'];
-      if (payment is Map<String, dynamic> && merged['payment'] == null) {
-        merged['payment'] = payment;
-      }
-      return merged;
-    }
-    return data;
-  }
-
-  Future<PagedResult<Order>> listOrders({int page = 1, int limit = 20}) async {
-    final json = await requestJson('GET', '/orders', query: {
-      'page': '$page',
-      'limit': '$limit',
-    });
-    return _paged(json, Order.fromJson);
-  }
-
-  Future<Order> getOrder(String id) async {
-    final json = await requestJson('GET', '/orders/$id');
-    return Order.fromJson(_data(json));
-  }
-
-  Future<Order> cancelOrder(String id) async {
-    final json = await requestJson('POST', '/orders/$id/cancel');
-    return Order.fromJson(_data(json));
-  }
-
-  // ---------------- Admin ----------------
+  // ---------------- Admin: produk & kategori ----------------
 
   Future<Product> createProduct(Product product) async {
     final json = await requestJson(
@@ -503,6 +433,15 @@ class ApiClient {
     await requestJson('DELETE', '/categories/$id');
   }
 
+  // ---------------- Admin: pesanan ----------------
+
+  /// Detail satu order (dipakai layar detail staf; backend mengizinkan
+  /// admin & superadmin melihat order mana pun).
+  Future<Order> getOrder(String id) async {
+    final json = await requestJson('GET', '/orders/$id');
+    return Order.fromJson(_data(json));
+  }
+
   Future<PagedResult<Order>> listAllOrders({
     int page = 1,
     int limit = 20,
@@ -520,6 +459,25 @@ class ApiClient {
     });
     return Order.fromJson(_data(json));
   }
+
+  /// Simulasi pembayaran (admin): tandai pembayaran order sebagai lunas
+  /// lewat jalur webhook yang sama (idempotent). Dipakai staf di antrean
+  /// dapur saat pelanggan sudah bayar tunai/QRIS di kasir.
+  /// POST /admin/orders/:id/simulate-payment -> {payment, order}.
+  Future<Order> simulatePayment(String orderId) async {
+    final json = await requestJson(
+      'POST',
+      '/admin/orders/$orderId/simulate-payment',
+    );
+    final data = _data(json);
+    final orderJson = data['order'];
+    if (orderJson is Map<String, dynamic>) {
+      return Order.fromJson(orderJson);
+    }
+    return Order.fromJson(data);
+  }
+
+  // ---------------- Admin: analitik profit ----------------
 
   /// Analitik profit admin.
   /// GET /admin/analytics/profit?period=today|7d|30d|all
@@ -541,10 +499,70 @@ class ApiClient {
     return ProfitAnalytics.fromJson(_data(json));
   }
 
-  /// Halaman simulasi pembayaran (MockPayPage). Dibuka di browser eksternal;
-  /// halaman ini TIDAK mengubah status order — status berubah lewat webhook
-  /// gateway (server-side). Aplikasi mem-poll GET /orders/:id sampai paid.
-  String mockPayUrl(String transactionId) => '$baseUrl/mock-pay/$transactionId';
+  // ---------------- Superadmin: manajemen user ----------------
+
+  Future<PagedResult<User>> listUsers({
+    int page = 1,
+    int limit = 20,
+    String? search,
+    String? role,
+    bool? isActive,
+  }) async {
+    final query = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+    };
+    if (search != null && search.isNotEmpty) query['search'] = search;
+    if (role != null && role.isNotEmpty) query['role'] = role;
+    if (isActive != null) query['is_active'] = isActive ? 'true' : 'false';
+    final json =
+        await requestJson('GET', '/superadmin/users', query: query);
+    return _paged(json, User.fromJson);
+  }
+
+  Future<UserStats> getUserStats() async {
+    final json = await requestJson('GET', '/superadmin/users/stats');
+    return UserStats.fromJson(_data(json));
+  }
+
+  Future<User> createUser({
+    required String name,
+    required String email,
+    required String password,
+    String phone = '',
+    required String role,
+  }) async {
+    final json = await requestJson('POST', '/superadmin/users', body: {
+      'name': name,
+      'email': email,
+      'password': password,
+      'phone': phone,
+      'role': role,
+    });
+    return User.fromJson(_data(json));
+  }
+
+  Future<User> updateUserRole(String id, String role) async {
+    final json = await requestJson(
+      'PUT',
+      '/superadmin/users/$id/role',
+      body: {'role': role},
+    );
+    return User.fromJson(_data(json));
+  }
+
+  Future<User> updateUserStatus(String id, bool isActive) async {
+    final json = await requestJson(
+      'PUT',
+      '/superadmin/users/$id/status',
+      body: {'is_active': isActive},
+    );
+    return User.fromJson(_data(json));
+  }
+
+  Future<void> deleteUser(String id) async {
+    await requestJson('DELETE', '/superadmin/users/$id');
+  }
 
   void dispose() => _http.close();
 }

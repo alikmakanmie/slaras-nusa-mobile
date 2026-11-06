@@ -1,7 +1,9 @@
 import 'utils.dart';
 
-/// Model-model domain, dipetakan 1:1 dari JSON backend Go
+/// Model-model domain APLIKASI STAFF, dipetakan dari JSON backend Go
 /// (lihat ecommerce-api/internal/domain/*.go).
+/// Fitur belanja pelanggan (keranjang/alamat/guest checkout) DIHAPUS —
+/// pelanggan memesan lewat website.
 
 class User {
   final String id;
@@ -27,6 +29,14 @@ class User {
 
   bool get isSuperAdmin => role == 'superadmin';
 
+  bool get isCustomer => role == 'customer';
+
+  String get roleLabel => switch (role) {
+        'superadmin' => 'SUPERADMIN',
+        'admin' => 'ADMIN TOKO',
+        _ => 'CUSTOMER',
+      };
+
   factory User.fromJson(Map<String, dynamic> json) => User(
         id: parseString(json['id']),
         name: parseString(json['name']),
@@ -44,6 +54,45 @@ class User {
         role: role,
         isActive: isActive,
       );
+}
+
+/// Statistik pengguna (superadmin).
+/// GET /superadmin/users/stats -> {total, admin, superadmin, customer,
+/// inactive, active}.
+class UserStats {
+  final int total;
+  final int admin;
+  final int superadmin;
+  final int customer;
+  final int inactive;
+  final int active;
+
+  const UserStats({
+    required this.total,
+    required this.admin,
+    required this.superadmin,
+    required this.customer,
+    required this.inactive,
+    required this.active,
+  });
+
+  factory UserStats.fromJson(Map<String, dynamic> json) => UserStats(
+        total: parseInt(json['total']),
+        admin: parseInt(json['admin']),
+        superadmin: parseInt(json['superadmin']),
+        customer: parseInt(json['customer']),
+        inactive: parseInt(json['inactive']),
+        active: parseInt(json['active']),
+      );
+
+  static const empty = UserStats(
+    total: 0,
+    admin: 0,
+    superadmin: 0,
+    customer: 0,
+    inactive: 0,
+    active: 0,
+  );
 }
 
 class Category {
@@ -140,122 +189,22 @@ class Product {
         'weight_gram': weightGram,
         'is_active': isActive,
       };
-}
 
-class CartItem {
-  final String id;
-  final String productId;
-  final Product? product;
-  final int quantity;
-  final int price;
-
-  const CartItem({
-    required this.id,
-    required this.productId,
-    required this.product,
-    required this.quantity,
-    required this.price,
-  });
-
-  int get subtotal => price * quantity;
-  String get productName => product?.name ?? 'Produk';
-
-  factory CartItem.fromJson(Map<String, dynamic> json) => CartItem(
-        id: parseString(json['id']),
-        productId: parseString(json['product_id']),
-        product: json['product'] is Map<String, dynamic>
-            ? Product.fromJson(json['product'] as Map<String, dynamic>)
-            : null,
-        quantity: parseInt(json['quantity']),
-        price: parseInt(json['price']),
+  Product copyWith({int? stock}) => Product(
+        id: id,
+        categoryId: categoryId,
+        category: category,
+        name: name,
+        slug: slug,
+        description: description,
+        price: price,
+        costPrice: costPrice,
+        stock: stock ?? this.stock,
+        sku: sku,
+        imageUrl: imageUrl,
+        weightGram: weightGram,
+        isActive: isActive,
       );
-}
-
-class Cart {
-  final String id;
-  final List<CartItem> items;
-  final int subtotal;
-  final int totalItems;
-
-  const Cart({
-    required this.id,
-    required this.items,
-    required this.subtotal,
-    required this.totalItems,
-  });
-
-  factory Cart.fromJson(Map<String, dynamic> json) {
-    // GET /cart mengembalikan data: {cart: {...}, subtotal, total_items}
-    final cartJson = json['cart'];
-    if (cartJson is Map<String, dynamic>) {
-      final rawItems = cartJson['items'];
-      final items = rawItems is List
-          ? rawItems
-              .whereType<Map<String, dynamic>>()
-              .map(CartItem.fromJson)
-              .toList()
-          : <CartItem>[];
-      return Cart(
-        id: parseString(cartJson['id']),
-        items: items,
-        subtotal: parseInt(json['subtotal']),
-        totalItems: parseInt(json['total_items']),
-      );
-    }
-    return const Cart(id: '', items: [], subtotal: 0, totalItems: 0);
-  }
-
-  static const empty = Cart(id: '', items: [], subtotal: 0, totalItems: 0);
-}
-
-class Address {
-  final String id;
-  final String label;
-  final String recipientName;
-  final String phone;
-  final String street;
-  final String city;
-  final String province;
-  final String postalCode;
-  final bool isDefault;
-
-  const Address({
-    required this.id,
-    required this.label,
-    required this.recipientName,
-    required this.phone,
-    required this.street,
-    required this.city,
-    required this.province,
-    required this.postalCode,
-    required this.isDefault,
-  });
-
-  String get fullAddress =>
-      '$street, $city, $province $postalCode';
-
-  factory Address.fromJson(Map<String, dynamic> json) => Address(
-        id: parseString(json['id']),
-        label: parseString(json['label']),
-        recipientName: parseString(json['recipient_name']),
-        phone: parseString(json['phone']),
-        street: parseString(json['street']),
-        city: parseString(json['city']),
-        province: parseString(json['province']),
-        postalCode: parseString(json['postal_code']),
-        isDefault: parseBool(json['is_default']),
-      );
-
-  Map<String, dynamic> toRequestJson() => {
-        'label': label,
-        'recipient_name': recipientName,
-        'phone': phone,
-        'street': street,
-        'city': city,
-        'province': province,
-        'postal_code': postalCode,
-        'is_default': isDefault,
-      };
 }
 
 class Payment {
@@ -348,6 +297,8 @@ class Order {
   final String shippingName;
   final String shippingPhone;
   final String shippingAddressText;
+  final String orderType; // dine_in | takeaway | delivery
+  final String tableNumber;
   final String processedByName; // nama staf yang memproses (audit trail)
   final List<OrderItem> items;
   final Payment? payment;
@@ -365,13 +316,30 @@ class Order {
     required this.shippingName,
     required this.shippingPhone,
     required this.shippingAddressText,
+    this.orderType = '',
+    this.tableNumber = '',
     this.processedByName = '',
     required this.items,
     required this.payment,
     required this.createdAt,
   });
 
-  bool get canCancel => status == 'pending' || status == 'paid';
+  /// Label jenis pesanan untuk antrean dapur: "MEJA 05" / "TAKEAWAY" /
+  /// "DELIVERY".
+  String get orderTypeLabel {
+    switch (orderType) {
+      case 'dine_in':
+        return tableNumber.isNotEmpty
+            ? 'MEJA $tableNumber'
+            : 'DINE-IN';
+      case 'takeaway':
+        return 'TAKEAWAY';
+      case 'delivery':
+        return 'DELIVERY';
+      default:
+        return orderType.isEmpty ? '-' : orderType.toUpperCase();
+    }
+  }
 
   factory Order.fromJson(Map<String, dynamic> json) {
     final rawItems = json['items'];
@@ -393,6 +361,8 @@ class Order {
       shippingName: parseString(json['shipping_name']),
       shippingPhone: parseString(json['shipping_phone']),
       shippingAddressText: parseString(json['shipping_address_text']),
+      orderType: parseString(json['order_type']),
+      tableNumber: parseString(json['table_number']),
       processedByName: parseString(json['processed_by_name']),
       items: items,
       payment: json['payment'] is Map<String, dynamic>
@@ -416,127 +386,6 @@ class PagedResult<T> {
     required this.totalPages,
     required this.total,
   });
-}
-
-/// Satu item untuk request guest checkout:
-/// POST /orders/guest-checkout {items: [{product_id, quantity, notes}]}.
-class GuestCheckoutItem {
-  final String productId;
-  final int quantity;
-  final String notes;
-
-  const GuestCheckoutItem({
-    required this.productId,
-    required this.quantity,
-    this.notes = '',
-  });
-
-  Map<String, dynamic> toJson() => {
-        'product_id': productId,
-        'quantity': quantity,
-        'notes': notes,
-      };
-}
-
-/// Item keranjang lokal tamu — disimpan di perangkat (SharedPreferences),
-/// tanpa login. Harga disalin saat ditambah (snapshot) agar subtotal
-/// tetap benar walau harga di server berubah.
-class LocalCartItem {
-  final String productId;
-  final String name;
-  final int price;
-  final String imageUrl;
-  final int quantity;
-  final String notes;
-
-  const LocalCartItem({
-    required this.productId,
-    required this.name,
-    required this.price,
-    required this.imageUrl,
-    required this.quantity,
-    this.notes = '',
-  });
-
-  int get subtotal => price * quantity;
-
-  factory LocalCartItem.fromProduct(Product p, int quantity) => LocalCartItem(
-        productId: p.id,
-        name: p.name,
-        price: p.price,
-        imageUrl: p.imageUrl,
-        quantity: quantity,
-      );
-
-  factory LocalCartItem.fromJson(Map<String, dynamic> json) => LocalCartItem(
-        productId: parseString(json['product_id']),
-        name: parseString(json['name']),
-        price: parseInt(json['price']),
-        imageUrl: parseString(json['image_url']),
-        quantity: parseInt(json['quantity'], 1),
-        notes: parseString(json['notes']),
-      );
-
-  Map<String, dynamic> toJson() => {
-        'product_id': productId,
-        'name': name,
-        'price': price,
-        'image_url': imageUrl,
-        'quantity': quantity,
-        'notes': notes,
-      };
-
-  LocalCartItem copyWith({int? quantity, String? notes}) => LocalCartItem(
-        productId: productId,
-        name: name,
-        price: price,
-        imageUrl: imageUrl,
-        quantity: quantity ?? this.quantity,
-        notes: notes ?? this.notes,
-      );
-}
-
-/// Nomor order tamu yang disimpan di perangkat, untuk menu
-/// "Pesanan Saya" tanpa login (dilacak via /orders/track/:order_number).
-class GuestOrderEntry {
-  final String orderNumber;
-  final String savedAt; // ISO-8601
-
-  const GuestOrderEntry({required this.orderNumber, required this.savedAt});
-
-  factory GuestOrderEntry.fromJson(Map<String, dynamic> json) =>
-      GuestOrderEntry(
-        orderNumber: parseString(json['order_number']),
-        savedAt: parseString(json['saved_at']),
-      );
-
-  Map<String, dynamic> toJson() => {
-        'order_number': orderNumber,
-        'saved_at': savedAt,
-      };
-}
-
-/// Satu baris keranjang yang seragam untuk tamu & member — dipakai
-/// Floating Cart Bar + sheet edit keranjang. `key` = id yang dipakai
-/// setQty/remove (productId untuk tamu, cart item id untuk member).
-class CartLine {
-  final String key;
-  final String productId;
-  final String name;
-  final int price;
-  final int quantity;
-  final String imageUrl;
-
-  const CartLine({
-    required this.key,
-    required this.productId,
-    required this.name,
-    required this.price,
-    required this.quantity,
-    this.imageUrl = '',
-  });
-
-  int get subtotal => price * quantity;
 }
 
 // ---------------- Analitik profit admin ----------------

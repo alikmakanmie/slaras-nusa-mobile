@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -25,6 +27,7 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
   int _totalPages = 1;
   bool _loadingMore = false;
   String? _statusFilter;
+  Timer? _autoRefresh;
 
   static const _statuses = [
     'pending',
@@ -39,6 +42,16 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
   void initState() {
     super.initState();
     _load(reset: true);
+    // Antrean dapur: segarkan otomatis tiap 30 detik.
+    _autoRefresh = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted && !_loading) _load(reset: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _autoRefresh?.cancel();
+    super.dispose();
   }
 
   Future<void> _load({required bool reset}) async {
@@ -107,10 +120,55 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
     }
   }
 
+  /// Simulasi pembayaran (admin): order pending -> paid lewat jalur
+  /// webhook yang sama. Dipakai saat pelanggan sudah bayar di kasir.
+  Future<void> _simulatePayment(Order order) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('SIMULASI BAYAR?'),
+        content: Text(
+          'Tandai ${order.orderNumber} (${formatRupiah(order.total)}) '
+          'sebagai LUNAS? Status berubah menjadi PAID.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('BATAL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('YA, LUNAS'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    try {
+      await context.read<ApiClient>().simulatePayment(order.id);
+      if (!mounted) return;
+      showSnack(context, '${order.orderNumber} lunas (PAID)');
+      _load(reset: true);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      showSnack(context, e.message, isError: true);
+    }
+  }
+
+  /// Label tombol aksi cepat sesuai alur dapur.
+  String _actionLabel(String current, String target) {
+    if (current == 'paid' && target == 'processing') {
+      return 'TERIMA & PROSES';
+    }
+    if (current == 'shipped' && target == 'completed') {
+      return 'SELESAIKAN PESANAN';
+    }
+    return '→ ${AppTheme.statusLabel(target)}';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('KELOLA PESANAN')),
       body: Column(
         children: [
           Padding(
@@ -227,7 +285,7 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
                                         ),
                                         const SizedBox(height: 6),
                                         Text(
-                                          '${order.items.length} item • ${order.shippingName} • ${formatTanggal(order.createdAt)}',
+                                          '${order.orderTypeLabel} • ${order.items.length} item • ${order.shippingName} • ${formatTanggal(order.createdAt)}',
                                           style: TextStyle(
                                             color: AppTheme.mutedOf(context),
                                             fontWeight: FontWeight.w600,
@@ -256,6 +314,15 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
                                             fontSize: 16,
                                           ),
                                         ),
+                                        if (order.status == 'pending') ...[
+                                          const SizedBox(height: 10),
+                                          BrutalButton(
+                                            label: 'SIMULASI BAYAR (LUNAS)',
+                                            primary: false,
+                                            onPressed: () =>
+                                                _simulatePayment(order),
+                                          ),
+                                        ],
                                         if (next.isNotEmpty) ...[
                                           const SizedBox(height: 10),
                                           Wrap(
@@ -287,7 +354,10 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
                                                         vertical: 6,
                                                       ),
                                                       child: Text(
-                                                        '→ ${AppTheme.statusLabel(s)}',
+                                                        _actionLabel(
+                                                          order.status,
+                                                          s,
+                                                        ),
                                                         style: const TextStyle(
                                                           color: Colors.white,
                                                           fontWeight:

@@ -6,6 +6,9 @@ import 'screens/splash_screen.dart';
 import 'state.dart';
 import 'theme.dart';
 
+/// SLARAS NUSA STAFF — aplikasi backoffice khusus Admin & Superadmin.
+/// Pelanggan memesan lewat website (guest checkout); aplikasi ini TIDAK
+/// punya katalog belanja, keranjang, atau guest checkout.
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final themeState = await ThemeState.load();
@@ -18,29 +21,20 @@ void main() async {
         ChangeNotifierProvider<AuthState>(
           create: (_) => AuthState(api),
         ),
-        ChangeNotifierProvider<CartState>(
-          create: (_) => CartState(api),
-        ),
-        ChangeNotifierProvider<AddressState>(
-          create: (_) => AddressState(api),
-        ),
-        ChangeNotifierProvider<GuestOrdersState>(
-          create: (_) => GuestOrdersState(),
-        ),
       ],
-      child: const SlarasApp(),
+      child: const SlarasStaffApp(),
     ),
   );
 }
 
-class SlarasApp extends StatelessWidget {
-  const SlarasApp({super.key});
+class SlarasStaffApp extends StatelessWidget {
+  const SlarasStaffApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     final isDark = context.watch<ThemeState>().isDark;
     return MaterialApp(
-      title: 'SLARAS NUSA FOODLAB',
+      title: 'SLARAS NUSA STAFF',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),

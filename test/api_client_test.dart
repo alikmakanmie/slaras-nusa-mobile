@@ -1,16 +1,20 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:slaras_nusa_foodlab/api.dart';
 import 'package:slaras_nusa_foodlab/config.dart';
 import 'package:slaras_nusa_foodlab/models.dart';
 
-/// Tes integrasi ApiClient ke API lokal.
+/// Tes integrasi ApiClient (APLIKASI STAFF) ke API lokal.
 ///
 /// Jalankan dengan API lokal menyala:
 ///   flutter test --dart-define API_BASE_URL=http://localhost:8080/api/v1
-/// Tanpa API lokal, tes ini gagal koneksi (bukan bug aplikasi).
+/// Tanpa API lokal, tes live gagal koneksi (bukan bug aplikasi).
+/// Tes fallback/override memakai MockClient (tanpa jaringan).
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   // flutter_test memblokir HttpClient nyata secara default; tes integrasi
@@ -19,94 +23,171 @@ void main() {
   // SharedPreferences butuh mock channel di lingkungan tes.
   SharedPreferences.setMockInitialValues({});
 
-  test('aliran penuh: login -> produk -> keranjang -> checkout -> order', () async {
+  test('aliran staf: login admin -> menu -> pesanan -> profit', () async {
     final api = ApiClient();
     addTearDown(api.dispose);
+    await api.init();
 
-    // 1. Login customer.
+    // 1. Login admin toko.
     final login = await api.login(
-      'customer@ecommerce.local',
-      'Customer123!',
+      'admin@ecommerce.local',
+      'Admin123!',
     );
-    expect(login.user.email, 'customer@ecommerce.local');
+    expect(login.user.email, 'admin@ecommerce.local');
+    expect(login.user.isAdmin, isTrue);
     expect(login.access, isNotEmpty);
 
-    // 2. Katalog: kategori + produk tersedia.
+    // 1b. Admin DITOLAK di endpoint superadmin (403).
+    await expectLater(
+      api.listUsers(),
+      throwsA(isA<ApiException>().having(
+        (e) => e.statusCode,
+        'statusCode',
+        403,
+      )),
+    );
+
+    // 2. Menu: kategori + produk tersedia.
     final categories = await api.listCategories();
     expect(categories, isNotEmpty);
     final products = await api.listProducts(limit: 20);
     expect(products.items, isNotEmpty);
-    // Pilih produk yang masih ada stoknya (stok DB lokal berkurang
-    // setiap kali tes checkout dijalankan — jangan pakai items.first).
-    final inStock = products.items.where((p) => p.stock > 0).toList();
-    if (inStock.isEmpty) {
-      markTestSkipped('semua produk stok habis di DB lokal — reset seeder');
+    expect(products.items.first.price, greaterThan(0));
+
+    // 3. Pesanan masuk (admin): ada data + order punya jenis pesanan.
+    final orders = await api.listAllOrders(limit: 50);
+    expect(orders.total, greaterThan(0));
+    expect(orders.items.first.orderNumber, isNotEmpty);
+
+    // 3b. Simulasi bayar: order pending -> paid (idempotent).
+    final pending = orders.items.where((o) => o.status == 'pending');
+    if (pending.isEmpty) {
+      markTestSkipped('tidak ada order pending di DB lokal');
+    } else {
+      final paid = await api.simulatePayment(pending.first.id);
+      expect(paid.status, 'paid');
+      final paidAgain = await api.simulatePayment(pending.first.id);
+      expect(paidAgain.status, 'paid');
     }
-    final first = inStock.first;
-    expect(first.price, greaterThan(0));
-    expect(first.stock, greaterThan(0));
 
-    // 3. Detail produk.
-    final detail = await api.getProduct(first.id);
-    expect(detail.id, first.id);
+    // 4. Dashboard profit admin.
+    final profit = await api.getProfitAnalytics(period: '30d');
+    expect(profit.summary.grossRevenue, greaterThanOrEqualTo(0));
+    expect(profit.summary.netProfit, greaterThanOrEqualTo(0));
 
-    // 4. Keranjang: tambah 1, ubah jadi 2, lalu cek subtotal.
-    await api.addToCart(first.id, 1);
-    var cart = await api.getCart();
-    expect(cart.totalItems, greaterThanOrEqualTo(1));
-    final item = cart.items.firstWhere((i) => i.productId == first.id);
-    await api.updateCartQty(item.id, 2);
-    cart = await api.getCart();
-    final updated =
-        cart.items.firstWhere((i) => i.productId == first.id);
-    expect(updated.quantity, 2);
-    expect(cart.subtotal, greaterThan(0));
-
-    // 5. Alamat: pakai yang default, atau buat bila belum ada.
-    var addresses = await api.listAddresses();
-    if (addresses.isEmpty) {
-      final created = await api.createAddress(const Address(
-        id: '',
-        label: 'Rumah',
-        recipientName: 'Customer Tes',
-        phone: '081234567890',
-        street: 'Jl. Tes No. 1',
-        city: 'Yogyakarta',
-        province: 'DIY',
-        postalCode: '55165',
-        isDefault: true,
-      ));
-      addresses = [created];
-    }
-    final address = addresses.firstWhere(
-      (a) => a.isDefault,
-      orElse: () => addresses.first,
-    );
-
-    // 6. Checkout QRIS -> order pending + payment_url mock-pay.
-    final order = await api.checkout(
-      addressId: address.id,
-      paymentMethod: 'qris',
-      notes: 'tes integrasi flutter',
-    );
-    expect(order.status, 'pending');
-    expect(order.total, greaterThan(0));
-    expect(order.payment, isNotNull);
-    expect(order.payment!.paymentUrl, contains('/mock-pay/'));
-
-    // 7. Order bisa dibaca kembali + keranjang kosong sesudah checkout.
-    final fetched = await api.getOrder(order.id);
-    expect(fetched.orderNumber, order.orderNumber);
-    cart = await api.getCart();
-    expect(cart.totalItems, 0);
-
-    // 8. Profil bisa dibaca.
+    // 5. Profil staf bisa dibaca.
     final profile = await api.getProfile();
     expect(profile.id, login.user.id);
 
-    // Bersihkan: batalkan order tes agar tidak mengotori data.
-    final cancelled = await api.cancelOrder(order.id);
-    expect(cancelled.status, 'cancelled');
+    await api.logout();
+  });
+
+  test('aliran superadmin: kelola user end-to-end', () async {
+    final api = ApiClient();
+    addTearDown(api.dispose);
+    await api.init();
+    await api.login('superadmin@slaras.local', 'SuperAdmin123!');
+
+    // Stats + list.
+    final stats = await api.getUserStats();
+    expect(stats.total, greaterThanOrEqualTo(6));
+    expect(stats.superadmin, greaterThanOrEqualTo(1));
+    final users = await api.listUsers(limit: 20);
+    expect(users.items.any((u) => u.email == 'admin@ecommerce.local'),
+        isTrue);
+
+    // Buat user temp, ubah role, suspend, hapus.
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final email = 'tes-staf-$stamp@slaras.local';
+    final created = await api.createUser(
+      name: 'Staf Tes',
+      email: email,
+      password: 'StafTes123!',
+      role: 'admin',
+    );
+    expect(created.role, 'admin');
+    expect(created.isActive, isTrue);
+    final asCustomer = await api.updateUserRole(created.id, 'customer');
+    expect(asCustomer.role, 'customer');
+    final suspended = await api.updateUserStatus(created.id, false);
+    expect(suspended.isActive, isFalse);
+    await api.deleteUser(created.id);
+    final after = await api.listUsers(search: email);
+    expect(after.items.where((u) => u.email == email), isEmpty);
+
+    await api.logout();
+  });
+
+  test('fallback: primary gagal DNS -> otomatis ke IP VPS', () async {
+    SharedPreferences.setMockInitialValues({});
+    final mock = MockClient((request) async {
+      if (request.url.host == Uri.parse(AppConfig.apiBaseUrl).host) {
+        throw const SocketException('Failed host lookup');
+      }
+      // Fallback (IP VPS) menjawab login.
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'data': {
+            'access_token': 'tok-akses',
+            'refresh_token': 'tok-refresh',
+            'user': {
+              'id': 'u1',
+              'name': 'Admin Tes',
+              'email': 'admin@ecommerce.local',
+              'phone': '',
+              'role': 'admin',
+              'is_active': true,
+            },
+          },
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+    final api = ApiClient(httpClient: mock);
+    addTearDown(api.dispose);
+    await api.init();
+    final login = await api.login('admin@ecommerce.local', 'Admin123!');
+    expect(login.user.role, 'admin');
+    expect(api.isUsingFallback, isTrue);
+    expect(api.baseUrl, AppConfig.fallbackApiBaseUrl);
+  });
+
+  test('fallback gagal total -> ApiException ramah (bukan ClientException)',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final mock = MockClient((_) async {
+      throw const SocketException('Failed host lookup');
+    });
+    final api = ApiClient(httpClient: mock);
+    addTearDown(api.dispose);
+    await api.init();
+    try {
+      await api.login('admin@ecommerce.local', 'Admin123!');
+      fail('harus melempar ApiException');
+    } on ApiException catch (e) {
+      expect(e.message, contains('Tidak bisa terhubung'));
+    }
+  });
+
+  test('override server manual tersimpan & bisa direset', () async {
+    SharedPreferences.setMockInitialValues({});
+    final api = ApiClient();
+    addTearDown(api.dispose);
+    await api.init();
+    expect(api.hasManualOverride, isFalse);
+    await api.setServerOverride('http://203.175.11.164:2150/api/v1');
+    expect(api.hasManualOverride, isTrue);
+    expect(api.baseUrl, 'http://203.175.11.164:2150/api/v1');
+    // Klien baru membaca override yang sama dari SharedPreferences.
+    final api2 = ApiClient();
+    addTearDown(api2.dispose);
+    await api2.init();
+    expect(api2.baseUrl, 'http://203.175.11.164:2150/api/v1');
+    await api2.setServerOverride(null);
+    expect(api2.hasManualOverride, isFalse);
+    expect(api2.baseUrl, AppConfig.apiBaseUrl);
   });
 
   test('base URL mengikuti dart-define API_BASE_URL', () {
@@ -117,6 +198,8 @@ void main() {
           ? 'https://api.alikmakanmie.my.id/api/v1'
           : defined,
     );
+    expect(AppConfig.fallbackApiBaseUrl,
+        'http://203.175.11.164:2150/api/v1');
   });
 
   test('resolveImageUrl menangani URL relatif dan absolut', () {
@@ -130,5 +213,29 @@ void main() {
       'https://cdn.example.com/x.jpg',
     );
     expect(AppConfig.resolveImageUrl(''), '');
+  });
+
+  test('Order.orderTypeLabel: meja / takeaway / delivery', () {
+    Order order(String type, String table) => Order(
+          id: 'o1',
+          orderNumber: 'ORD-X',
+          status: 'pending',
+          subtotal: 0,
+          shippingCost: 0,
+          total: 0,
+          paymentMethod: 'qris',
+          notes: '',
+          shippingName: 'Tamu',
+          shippingPhone: '',
+          shippingAddressText: '',
+          orderType: type,
+          tableNumber: table,
+          items: const [],
+          payment: null,
+          createdAt: '',
+        );
+    expect(order('dine_in', '05').orderTypeLabel, 'MEJA 05');
+    expect(order('takeaway', '').orderTypeLabel, 'TAKEAWAY');
+    expect(order('delivery', '').orderTypeLabel, 'DELIVERY');
   });
 }

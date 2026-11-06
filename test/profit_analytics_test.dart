@@ -1,15 +1,11 @@
 import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:slaras_nusa_foodlab/api.dart';
 import 'package:slaras_nusa_foodlab/models.dart';
-import 'package:slaras_nusa_foodlab/screens/floating_cart_bar.dart';
-import 'package:slaras_nusa_foodlab/state.dart';
 
-/// Tes Dashboard Profit admin + Floating Cart Bar.
+/// Tes Dashboard Profit admin (model + endpoint live).
 ///
 /// Jalankan dengan API lokal menyala:
 ///   flutter test --dart-define API_BASE_URL=http://localhost:8080/api/v1
@@ -131,6 +127,7 @@ void main() {
   test('admin profit live: today + 7d', () async {
     final api = ApiClient();
     addTearDown(api.dispose);
+    await api.init();
     await api.login('admin@ecommerce.local', 'Admin123!');
     late final ProfitAnalytics today;
     try {
@@ -148,87 +145,5 @@ void main() {
     expect(week.period, '7d');
     expect(week.dailySeries.length, greaterThanOrEqualTo(1));
     await api.logout();
-  });
-
-  testWidgets('FloatingCartBar muncul saat keranjang berisi item',
-      (tester) async {
-    final api = ApiClient();
-    addTearDown(api.dispose);
-    final cart = CartState(api);
-    final auth = AuthState(api);
-    await cart.init(loggedIn: false);
-
-    const productA = Product(
-      id: 'p-a',
-      categoryId: 'c1',
-      category: null,
-      name: 'Nasi Goreng Slaras',
-      slug: 'nasi-goreng-slaras',
-      description: '',
-      price: 25000,
-      stock: 10,
-      sku: 'SNF-NAS-001',
-      imageUrl: '',
-      weightGram: 300,
-      isActive: true,
-    );
-    const productB = Product(
-      id: 'p-b',
-      categoryId: 'c1',
-      category: null,
-      name: 'Es Teh Melati',
-      slug: 'es-teh-melati',
-      description: '',
-      price: 6000,
-      stock: 10,
-      sku: 'SNF-TEH-001',
-      imageUrl: '',
-      weightGram: 100,
-      isActive: true,
-    );
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: MultiProvider(
-            providers: [
-              ChangeNotifierProvider<CartState>.value(value: cart),
-              ChangeNotifierProvider<AuthState>.value(value: auth),
-            ],
-            child: const Stack(
-              children: [
-                SizedBox.expand(),
-                Positioned(
-                  left: 12,
-                  right: 12,
-                  bottom: 12,
-                  child: FloatingCartBar(),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-
-    // Keranjang kosong -> bar tidak tampil.
-    expect(find.text('CHECKOUT SEKARANG →'), findsNothing);
-
-    // Tambah 2 item -> bar muncul dengan badge + total.
-    await cart.addLocal(productA, 1);
-    await cart.addLocal(productB, 2);
-    await tester.pump();
-    expect(find.text('[ 3 ITEM ]'), findsOneWidget);
-    expect(find.text('CHECKOUT SEKARANG →'), findsOneWidget);
-    expect(find.text('LIHAT / EDIT'), findsOneWidget);
-    // Total: 25000 + 2x6000 = 37000.
-    expect(find.text('Rp37.000'), findsOneWidget);
-    // Nama menu singkat tampil.
-    expect(find.textContaining('Nasi Goreng Slaras'), findsOneWidget);
-
-    // Kosongkan -> bar hilang lagi.
-    await cart.clearLocalCart();
-    await tester.pump();
-    expect(find.text('CHECKOUT SEKARANG →'), findsNothing);
   });
 }

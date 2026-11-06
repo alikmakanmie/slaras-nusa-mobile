@@ -75,7 +75,6 @@ class _AdminProfitScreenState extends State<AdminProfitScreen> {
   Widget build(BuildContext context) {
     final data = _data;
     return Scaffold(
-      appBar: AppBar(title: const Text('DASHBOARD PROFIT')),
       body: RefreshIndicator(
         onRefresh: _load,
         color: AppTheme.borderOf(context),

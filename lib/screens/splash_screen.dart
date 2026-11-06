@@ -4,11 +4,12 @@ import 'package:provider/provider.dart';
 import '../state.dart';
 import '../theme.dart';
 import 'home_shell.dart';
-import 'onboarding_screen.dart';
+import 'login_screen.dart';
 
-/// Splash: logo brutal + cek sesi tersimpan, lalu arahkan ke
-/// Onboarding (baru pertama kali) / Katalog (HomeShell).
-/// Login TIDAK dipaksa — tamu langsung bisa lihat katalog & pesan.
+/// Splash: logo brutal + cek sesi staf tersimpan.
+/// - Staf sudah login -> HomeShell (dashboard).
+/// - Belum login / sesi customer -> LoginScreen (login WAJIB, tidak ada
+///   mode tamu: aplikasi ini khusus Admin & Superadmin).
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -29,17 +30,8 @@ class _SplashScreenState extends State<SplashScreen> {
     final auth = context.read<AuthState>();
     await auth.init();
     if (!mounted) return;
-    // Keranjang lokal + daftar order tamu dimuat tanpa login;
-    // bila sesi member tersimpan, keranjang beralih ke mode server.
-    await context.read<CartState>().init(loggedIn: auth.isLoggedIn);
-    if (!mounted) return;
-    await context.read<GuestOrdersState>().load();
-    if (!mounted) return;
-    final seen = await OnboardingScreen.hasSeen();
-    if (!mounted) return;
-    // Tamu maupun member langsung ke katalog — login hanya di tab Profil.
     final Widget next =
-        seen ? const HomeShell() : const OnboardingScreen();
+        auth.isLoggedIn ? const HomeShell() : const LoginScreen();
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => next),
     );
@@ -78,7 +70,7 @@ class _SplashScreenState extends State<SplashScreen> {
             ),
             const SizedBox(height: 18),
             const Text(
-              'NUSA FOODLAB',
+              'NUSA STAFF',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 18,
@@ -88,7 +80,7 @@ class _SplashScreenState extends State<SplashScreen> {
             ),
             const SizedBox(height: 10),
             const Text(
-              'KULINER • F&B • HAMPERS',
+              'ADMIN & SUPERADMIN PORTAL',
               style: TextStyle(
                 color: Colors.white70,
                 fontSize: 11,

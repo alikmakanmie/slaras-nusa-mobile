@@ -6,9 +6,9 @@ import '../models.dart';
 import '../theme.dart';
 import '../utils.dart';
 import '../widgets.dart';
-import 'payment_screen.dart';
 
-/// Detail + tracking status order (timeline).
+/// Detail order (staf): timeline status, item, alamat, pembayaran +
+/// simulasi bayar & batalkan via endpoint admin.
 class OrderDetailScreen extends StatefulWidget {
   final String orderId;
 
@@ -65,6 +65,41 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
+  Future<void> _simulatePayment() async {
+    final order = _order;
+    if (order == null) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('SIMULASI BAYAR?'),
+        content: Text(
+          'Tandai ${order.orderNumber} (${formatRupiah(order.total)}) '
+          'sebagai LUNAS? Status berubah menjadi PAID.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('BATAL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('YA, LUNAS'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    try {
+      await context.read<ApiClient>().simulatePayment(order.id);
+      if (!mounted) return;
+      showSnack(context, '${order.orderNumber} lunas (PAID)');
+      _load();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      showSnack(context, e.message, isError: true);
+    }
+  }
+
   Future<void> _cancel() async {
     final order = _order;
     if (order == null) return;
@@ -88,7 +123,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     if (confirm != true) return;
     if (!mounted) return;
     try {
-      await context.read<ApiClient>().cancelOrder(order.id);
+      await context
+          .read<ApiClient>()
+          .updateOrderStatus(order.id, 'cancelled');
       if (!mounted) return;
       showSnack(context, 'Order dibatalkan');
       _load();
@@ -140,6 +177,19 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                               ],
                             ),
                             const SizedBox(height: 4),
+                            Text(
+                              'Jenis: ${order.orderTypeLabel}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            if (order.processedByName.isNotEmpty)
+                              Text(
+                                'Diproses oleh: ${order.processedByName}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
                             Text(
                               'Dibuat: ${formatTanggal(order.createdAt)}',
                               style: TextStyle(
@@ -261,17 +311,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                       if (order.status == 'pending' &&
                           order.payment != null)
                         BrutalButton(
-                          label: 'LANJUT BAYAR',
+                          label: 'SIMULASI BAYAR (LUNAS)',
                           icon: Icons.payment,
-                          onPressed: () {
-                            Navigator.of(context).pushReplacement(
-                              MaterialPageRoute(
-                                builder: (_) => PaymentScreen(order: order),
-                              ),
-                            );
-                          },
+                          onPressed: _simulatePayment,
                         ),
-                      if (order.canCancel) ...[
+                      if (order.status == 'pending' ||
+                          order.status == 'paid' ||
+                          order.status == 'processing') ...[
                         const SizedBox(height: 12),
                         BrutalButton(
                           label: 'BATALKAN ORDER',

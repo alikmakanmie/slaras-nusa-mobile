@@ -6,6 +6,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../utils.dart';
 import '../widgets.dart';
+import 'admin_categories_screen.dart';
 import 'admin_product_form_screen.dart';
 
 /// Admin: kelola produk (list, cari, tambah, edit, hapus).
@@ -91,6 +92,25 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
     }
   }
 
+  Future<void> _changeStock(Product p, int delta) async {
+    final next = p.stock + delta;
+    if (next < 0) return;
+    final idx = _products.indexWhere((e) => e.id == p.id);
+    if (idx < 0) return;
+    final old = _products[idx];
+    setState(() => _products[idx] = p.copyWith(stock: next));
+    try {
+      await context.read<ApiClient>().updateProduct(
+            p.id,
+            p.copyWith(stock: next),
+          );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _products[idx] = old);
+      showSnack(context, e.message, isError: true);
+    }
+  }
+
   Future<void> _openForm({Product? product}) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -107,7 +127,6 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('KELOLA PRODUK')),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _openForm(),
         backgroundColor: AppTheme.pureBlack,
@@ -120,6 +139,25 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
       ),
       body: Column(
         children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            child: BrutalButton(
+              label: 'KELOLA KATEGORI',
+              primary: false,
+              onPressed: () async {
+                await Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const AdminCategoriesScreen(),
+                  ),
+                );
+                _load(
+                  search: _searchController.text.trim().isEmpty
+                      ? null
+                      : _searchController.text.trim(),
+                );
+              },
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.all(16),
             child: TextField(
@@ -213,6 +251,32 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
                                                   fontWeight: FontWeight.w800,
                                                   fontSize: 12,
                                                 ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                children: [
+                                                  Text(
+                                                    'STOK ',
+                                                    style: TextStyle(
+                                                      color: AppTheme.mutedOf(
+                                                        context,
+                                                      ),
+                                                      fontWeight:
+                                                          FontWeight.w800,
+                                                      fontSize: 11,
+                                                      letterSpacing: 1,
+                                                    ),
+                                                  ),
+                                                  QtyStepper(
+                                                    value: p.stock,
+                                                    min: 0,
+                                                    onChanged: (v) =>
+                                                        _changeStock(
+                                                      p,
+                                                      v - p.stock,
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
                                             ],
                                           ),
