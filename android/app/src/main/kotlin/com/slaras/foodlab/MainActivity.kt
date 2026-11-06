@@ -1,4 +1,4 @@
-package com.slaras.foodlab.slaras_nusa_foodlab
+package com.slaras.foodlab
 
 import io.flutter.embedding.android.FlutterActivity
 
