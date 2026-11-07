@@ -1,4 +1,100 @@
+import 'dart:convert';
+
 import 'utils.dart';
+
+/// Opsi modifier (varian / add-on) satu produk.
+class ModifierOption {
+  final String name;
+  final int priceDelta; // tambahan harga jual (Rp)
+  final int costDelta; // tambahan HPP (Rp)
+
+  const ModifierOption({
+    required this.name,
+    this.priceDelta = 0,
+    this.costDelta = 0,
+  });
+
+  factory ModifierOption.fromJson(Map<String, dynamic> json) =>
+      ModifierOption(
+        name: parseString(json['name']),
+        priceDelta: parseInt(json['price_delta']),
+        costDelta: parseInt(json['cost_delta']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'price_delta': priceDelta,
+        'cost_delta': costDelta,
+      };
+}
+
+/// Grup modifier, mis. Temperature (single) atau Add-Ons (multi).
+class ModifierGroup {
+  final String name;
+  final String type; // "single" | "multi"
+  final List<ModifierOption> options;
+
+  const ModifierGroup({
+    required this.name,
+    this.type = 'single',
+    this.options = const [],
+  });
+
+  factory ModifierGroup.fromJson(Map<String, dynamic> json) {
+    final raw = json['options'];
+    final opts = raw is List
+        ? raw
+            .whereType<Map<String, dynamic>>()
+            .map(ModifierOption.fromJson)
+            .toList()
+        : <ModifierOption>[];
+    return ModifierGroup(
+      name: parseString(json['name']),
+      type: parseString(json['type'], 'single'),
+      options: opts,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'type': type,
+        'options': options.map((o) => o.toJson()).toList(),
+      };
+}
+
+/// Modifier bawaan seeder backend untuk produk minuman/makanan.
+List<ModifierGroup> defaultModifiers() => const [
+      ModifierGroup(name: 'Temperature', type: 'single', options: [
+        ModifierOption(name: 'Iced'),
+        ModifierOption(name: 'Hot'),
+      ]),
+      ModifierGroup(name: 'Sugar Level', type: 'single', options: [
+        ModifierOption(name: 'Normal Sugar'),
+        ModifierOption(name: 'Less Sugar'),
+        ModifierOption(name: 'No Sugar'),
+      ]),
+      ModifierGroup(name: 'Ice Level', type: 'single', options: [
+        ModifierOption(name: 'Normal Ice'),
+        ModifierOption(name: 'Less Ice'),
+      ]),
+      ModifierGroup(name: 'Add-Ons', type: 'multi', options: [
+        ModifierOption(
+          name: 'Extra Espresso Shot',
+          priceDelta: 5000,
+          costDelta: 2500,
+        ),
+        ModifierOption(
+          name: 'Upgrade Oat Milk',
+          priceDelta: 8000,
+          costDelta: 4500,
+        ),
+        ModifierOption(
+          name: 'Extra Cheese / Sambal',
+          priceDelta: 4000,
+          costDelta: 2000,
+        ),
+      ]),
+    ];
 
 /// Model-model domain APLIKASI STAFF, dipetakan dari JSON backend Go
 /// (lihat ecommerce-api/internal/domain/*.go).
@@ -139,6 +235,8 @@ class Product {
   final String imageUrl;
   final int weightGram;
   final bool isActive;
+  final bool isAvailable; // toggle 1-klik Sold Out (tanpa ubah stok)
+  final List<ModifierGroup> modifiers; // dari modifiers_json backend
 
   const Product({
     required this.id,
@@ -154,9 +252,41 @@ class Product {
     required this.imageUrl,
     required this.weightGram,
     required this.isActive,
+    this.isAvailable = true,
+    this.modifiers = const [],
   });
 
   String get categoryName => category?.name ?? '';
+
+  /// Parse modifiers_json backend: bisa berupa string JSON, Map
+  /// {groups:[...]}, atau List grup langsung. Gagal parse -> kosong.
+  static List<ModifierGroup> parseModifiers(dynamic raw) {
+    if (raw == null) return const [];
+    try {
+      dynamic decoded = raw;
+      if (raw is String) {
+        if (raw.trim().isEmpty) return const [];
+        decoded = jsonDecode(raw);
+      }
+      if (decoded is Map<String, dynamic>) {
+        final g = decoded['groups'];
+        if (g is List) {
+          return g
+              .whereType<Map<String, dynamic>>()
+              .map(ModifierGroup.fromJson)
+              .toList();
+        }
+        return const [];
+      }
+      if (decoded is List) {
+        return decoded
+            .whereType<Map<String, dynamic>>()
+            .map(ModifierGroup.fromJson)
+            .toList();
+      }
+    } catch (_) {}
+    return const [];
+  }
 
   factory Product.fromJson(Map<String, dynamic> json) => Product(
         id: parseString(json['id']),
@@ -174,23 +304,41 @@ class Product {
         imageUrl: parseString(json['image_url']),
         weightGram: parseInt(json['weight_gram']),
         isActive: parseBool(json['is_active'], true),
+        isAvailable: parseBool(json['is_available'], true),
+        modifiers: parseModifiers(json['modifiers_json']),
       );
 
-  Map<String, dynamic> toRequestJson() => {
-        'category_id': categoryId,
-        'name': name,
-        'slug': slug,
-        'description': description,
-        'price': price,
-        'cost_price': costPrice,
-        'stock': stock,
-        'sku': sku,
-        'image_url': imageUrl,
-        'weight_gram': weightGram,
-        'is_active': isActive,
-      };
+  Map<String, dynamic> toRequestJson() {
+    final m = {
+      'category_id': categoryId,
+      'name': name,
+      'slug': slug,
+      'description': description,
+      'price': price,
+      'cost_price': costPrice,
+      'stock': stock,
+      'sku': sku,
+      'image_url': imageUrl,
+      'weight_gram': weightGram,
+      'is_active': isActive,
+      'is_available': isAvailable,
+    };
+    if (modifiers.isNotEmpty) {
+      m['modifiers_json'] = jsonEncode({
+        'groups': modifiers.map((g) => g.toJson()).toList(),
+      });
+    }
+    return m;
+  }
 
-  Product copyWith({int? stock}) => Product(
+  Product copyWith({
+    int? stock,
+    bool? isAvailable,
+    List<ModifierGroup>? modifiers,
+    int? costPrice,
+    bool? isActive,
+  }) =>
+      Product(
         id: id,
         categoryId: categoryId,
         category: category,
@@ -198,12 +346,14 @@ class Product {
         slug: slug,
         description: description,
         price: price,
-        costPrice: costPrice,
+        costPrice: costPrice ?? this.costPrice,
         stock: stock ?? this.stock,
         sku: sku,
         imageUrl: imageUrl,
         weightGram: weightGram,
-        isActive: isActive,
+        isActive: isActive ?? this.isActive,
+        isAvailable: isAvailable ?? this.isAvailable,
+        modifiers: modifiers ?? this.modifiers,
       );
 }
 
@@ -253,6 +403,9 @@ class OrderItem {
   final int quantity;
   final int subtotal;
   final String notes; // catatan dapur per item (guest checkout)
+  final List<ModifierOption> selectedModifiers; // varian/add-on dipilih
+  final int unitPrice; // harga dasar + harga add-on
+  final int unitCost; // HPP dasar + HPP add-on
 
   const OrderItem({
     required this.id,
@@ -262,7 +415,46 @@ class OrderItem {
     required this.quantity,
     required this.subtotal,
     this.notes = '',
+    this.selectedModifiers = const [],
+    this.unitPrice = 0,
+    this.unitCost = 0,
   });
+
+  /// "Less Sugar, Extra Espresso Shot" — kosong bila tanpa varian.
+  String get modifiersLabel =>
+      selectedModifiers.map((m) => m.name).join(', ');
+
+  /// Parse selected_modifiers: List map, string JSON, atau ringkasan teks.
+  static List<ModifierOption> parseSelectedModifiers(dynamic raw) {
+    if (raw == null) return const [];
+    try {
+      dynamic decoded = raw;
+      if (raw is String) {
+        if (raw.trim().isEmpty) return const [];
+        try {
+          decoded = jsonDecode(raw);
+        } catch (_) {
+          // Ringkasan teks polos, mis. "Less Sugar, Extra Shot".
+          return raw
+              .split(',')
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .map((s) => ModifierOption(name: s))
+              .toList();
+        }
+      }
+      if (decoded is List) {
+        return decoded
+            .whereType<Map<String, dynamic>>()
+            .map(ModifierOption.fromJson)
+            .toList();
+      }
+      if (decoded is Map<String, dynamic>) {
+        return [ModifierOption.fromJson(decoded)];
+      }
+    } catch (_) {}
+    return const [];
+  }
 
   factory OrderItem.fromJson(Map<String, dynamic> json) {
     // Nama produk bisa datang sebagai product_name (flat) atau
@@ -273,14 +465,19 @@ class OrderItem {
         (json['product'] as Map<String, dynamic>)['name'],
       );
     }
+    final price = parseInt(json['price']);
     return OrderItem(
       id: parseString(json['id']),
       productId: parseString(json['product_id']),
       productName: name,
-      price: parseInt(json['price']),
+      price: price,
       quantity: parseInt(json['quantity']),
       subtotal: parseInt(json['subtotal']),
       notes: parseString(json['notes']),
+      selectedModifiers:
+          parseSelectedModifiers(json['selected_modifiers']),
+      unitPrice: parseInt(json['unit_price'], price),
+      unitCost: parseInt(json['unit_cost']),
     );
   }
 }
@@ -300,6 +497,8 @@ class Order {
   final String orderType; // dine_in | takeaway | delivery
   final String tableNumber;
   final String processedByName; // nama staf yang memproses (audit trail)
+  final int discountAmount; // potongan voucher (Rp)
+  final String voucherCode; // kode voucher yang dipakai
   final List<OrderItem> items;
   final Payment? payment;
   final String createdAt;
@@ -319,6 +518,8 @@ class Order {
     this.orderType = '',
     this.tableNumber = '',
     this.processedByName = '',
+    this.discountAmount = 0,
+    this.voucherCode = '',
     required this.items,
     required this.payment,
     required this.createdAt,
@@ -364,6 +565,8 @@ class Order {
       orderType: parseString(json['order_type']),
       tableNumber: parseString(json['table_number']),
       processedByName: parseString(json['processed_by_name']),
+      discountAmount: parseInt(json['discount_amount']),
+      voucherCode: parseString(json['voucher_code']),
       items: items,
       payment: json['payment'] is Map<String, dynamic>
           ? Payment.fromJson(json['payment'] as Map<String, dynamic>)
@@ -603,4 +806,86 @@ class ProfitAnalytics {
           listOf(json['recent_transactions'], RecentTransaction.fromJson),
     );
   }
+}
+
+// ---------------- Voucher promo ----------------
+// GET/POST/PUT/DELETE /admin/vouchers (admin/superadmin).
+
+class Voucher {
+  final String id;
+  final String code; // unik, uppercase
+  final String discountType; // "percentage" | "fixed"
+  final int discountValue; // % atau Rp
+  final int minOrderAmount;
+  final int maxDiscount; // 0 = tanpa batas
+  final int quota; // 0 = tanpa batas
+  final int usedCount;
+  final bool isActive;
+  final String? expiresAt; // ISO / YYYY-MM-DD
+
+  const Voucher({
+    required this.id,
+    required this.code,
+    required this.discountType,
+    required this.discountValue,
+    this.minOrderAmount = 0,
+    this.maxDiscount = 0,
+    this.quota = 0,
+    this.usedCount = 0,
+    this.isActive = true,
+    this.expiresAt,
+  });
+
+  String get discountLabel => discountType == 'percentage'
+      ? 'DISKON $discountValue%'
+      : 'POTONGAN ${formatRupiah(discountValue)}';
+
+  String get quotaLabel =>
+      quota > 0 ? '$usedCount/$quota dipakai' : '$usedCount dipakai';
+
+  factory Voucher.fromJson(Map<String, dynamic> json) => Voucher(
+        id: parseString(json['id']),
+        code: parseString(json['code']).toUpperCase(),
+        discountType: parseString(json['discount_type'], 'fixed'),
+        discountValue: parseInt(json['discount_value']),
+        minOrderAmount: parseInt(json['min_order_amount']),
+        maxDiscount: parseInt(json['max_discount']),
+        quota: parseInt(json['quota']),
+        usedCount: parseInt(json['used_count']),
+        isActive: parseBool(json['is_active'], true),
+        expiresAt: json['expires_at']?.toString(),
+      );
+
+  Map<String, dynamic> toRequestJson() => {
+        'code': code.toUpperCase(),
+        'discount_type': discountType,
+        'discount_value': discountValue,
+        'min_order_amount': minOrderAmount,
+        'max_discount': maxDiscount,
+        'quota': quota,
+        'is_active': isActive,
+        if (expiresAt != null && expiresAt!.isNotEmpty)
+          'expires_at': expiresAt,
+      };
+}
+
+// ---------------- Loyalitas pelanggan (via nomor HP) ----------------
+// GET /loyalty/:phone -> {phone, points, reward_eligible}.
+
+class LoyaltyInfo {
+  final String phone;
+  final int points; // stamp terkumpul (1 per pesanan lunas / per Rp20rb)
+  final bool rewardEligible; // true bila sudah 10 poin
+
+  const LoyaltyInfo({
+    required this.phone,
+    this.points = 0,
+    this.rewardEligible = false,
+  });
+
+  factory LoyaltyInfo.fromJson(Map<String, dynamic> json) => LoyaltyInfo(
+        phone: parseString(json['phone']),
+        points: parseInt(json['points']),
+        rewardEligible: parseBool(json['reward_eligible'], false),
+      );
 }

@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../staff_helpers.dart';
+import '../state.dart';
 import '../theme.dart';
 import '../utils.dart';
 import '../widgets.dart';
@@ -98,6 +101,43 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       if (!mounted) return;
       showSnack(context, e.message, isError: true);
     }
+  }
+
+  Future<void> _showReceipt() async {
+    final order = _order;
+    if (order == null) return;
+    final cashier = context.read<AuthState>().user?.name;
+    final text = receiptText(order, cashierName: cashier);
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('STRUK THERMAL'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            text,
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              Navigator.of(context).pop();
+              showSnack(context, 'Struk disalin — tempel ke printer/WA');
+            },
+            child: const Text('SALIN STRUK'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('TUTUP'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _cancel() async {
@@ -227,29 +267,57 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                               Padding(
                                 padding:
                                     const EdgeInsets.only(bottom: 8),
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
                                   children: [
-                                    Expanded(
-                                      child: Text(
-                                        '${item.productName} x${item.quantity}',
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            '${item.productName} x${item.quantity}',
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                        Text(
+                                          formatRupiah(item.subtotal),
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    if (item.modifiersLabel.isNotEmpty)
+                                      Text(
+                                        '+ ${item.modifiersLabel}',
                                         style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 12,
                                         ),
                                       ),
-                                    ),
-                                    Text(
-                                      formatRupiah(item.subtotal),
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w800,
+                                    if (item.notes.isNotEmpty)
+                                      Text(
+                                        '* ${item.notes}',
+                                        style: TextStyle(
+                                          color: AppTheme.mutedOf(context),
+                                          fontWeight: FontWeight.w500,
+                                          fontSize: 12,
+                                        ),
                                       ),
-                                    ),
                                   ],
                                 ),
                               ),
                             const Divider(thickness: 2, height: 18),
                             _totalRow('Subtotal', order.subtotal),
+                            if (order.voucherCode.isNotEmpty)
+                              _totalRow(
+                                'Voucher ${order.voucherCode}',
+                                -order.discountAmount,
+                              ),
                             _totalRow('Ongkir', order.shippingCost),
                             _totalRow('TOTAL', order.total, bold: true),
                           ],
@@ -308,6 +376,12 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                         ),
                       ],
                       const SizedBox(height: 20),
+                      BrutalButton(
+                        label: 'CETAK STRUK',
+                        icon: Icons.print,
+                        onPressed: _showReceipt,
+                      ),
+                      const SizedBox(height: 12),
                       if (order.status == 'pending' &&
                           order.payment != null)
                         BrutalButton(

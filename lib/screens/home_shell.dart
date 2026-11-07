@@ -7,14 +7,18 @@ import 'admin_orders_screen.dart';
 import 'admin_products_screen.dart';
 import 'admin_profit_screen.dart';
 import 'admin_users_screen.dart';
+import 'admin_vouchers_screen.dart';
 import 'login_screen.dart';
+import 'table_qr_screen.dart';
 
 /// Shell utama APLIKASI STAFF: bottom navigation khusus admin/superadmin.
 ///
 /// - Tab 1: DASHBOARD PROFIT
 /// - Tab 2: PESANAN MASUK (POS / antrean dapur)
 /// - Tab 3: KELOLA MENU & STOK
-/// - Tab 4: KELOLA USER — hanya bila role == superadmin (disembunyikan
+/// - Tab 4: QR CODE MEJA (Meja 01–20)
+/// - Tab 5: KELOLA VOUCHER
+/// - Tab 6: KELOLA USER — hanya bila role == superadmin (disembunyikan
 ///   untuk admin biasa).
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -67,43 +71,55 @@ class HomeShellState extends State<HomeShell> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     final labels = isSuperAdmin
-        ? const ['DASHBOARD', 'PESANAN', 'MENU', 'USER']
-        : const ['DASHBOARD', 'PESANAN', 'MENU'];
+        ? const ['DASHBOARD', 'PESANAN', 'MENU', 'QR', 'VOUCHER', 'USER']
+        : const ['DASHBOARD', 'PESANAN', 'MENU', 'QR', 'VOUCHER'];
     final titles = isSuperAdmin
         ? const [
             'DASHBOARD PROFIT',
             'PESANAN MASUK',
             'KELOLA MENU & STOK',
+            'QR CODE MEJA',
+            'KELOLA VOUCHER',
             'KELOLA USER',
           ]
         : const [
             'DASHBOARD PROFIT',
             'PESANAN MASUK',
             'KELOLA MENU & STOK',
+            'QR CODE MEJA',
+            'KELOLA VOUCHER',
           ];
     final icons = isSuperAdmin
         ? const [
             Icons.bar_chart,
             Icons.receipt_long,
             Icons.restaurant_menu,
+            Icons.qr_code,
+            Icons.local_offer,
             Icons.group,
           ]
         : const [
             Icons.bar_chart,
             Icons.receipt_long,
             Icons.restaurant_menu,
+            Icons.qr_code,
+            Icons.local_offer,
           ];
     final tabs = isSuperAdmin
         ? const [
             AdminProfitScreen(),
             AdminOrdersScreen(),
             AdminProductsScreen(),
+            TableQrScreen(),
+            AdminVouchersScreen(),
             AdminUsersScreen(),
           ]
         : const [
             AdminProfitScreen(),
             AdminOrdersScreen(),
             AdminProductsScreen(),
+            TableQrScreen(),
+            AdminVouchersScreen(),
           ];
     final safeIndex = _index.clamp(0, tabs.length - 1);
 

@@ -1,10 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../staff_helpers.dart';
+import '../state.dart';
 import '../theme.dart';
 import '../utils.dart';
 import '../widgets.dart';
@@ -28,6 +31,16 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
   bool _loadingMore = false;
   String? _statusFilter;
   Timer? _autoRefresh;
+  // Pelacak pesanan PAID yang sudah terlihat — pesanan baru membunyikan
+  // alert kasir (getar + banner berkedip + snackbar). Tanpa package audio
+  // tambahan (pub cache offline tidak menyediakan audioplayers/share_plus):
+  // HapticFeedback berat + banner visual adalah alert yang andal di dapur.
+  final Set<String> _seenPaidIds = {};
+  bool _firstLoadDone = false;
+  bool _newOrderFlash = false;
+  bool _flashOn = false;
+  Timer? _flashTimer;
+  String _lastNewOrder = '';
 
   static const _statuses = [
     'pending',
@@ -42,8 +55,8 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
   void initState() {
     super.initState();
     _load(reset: true);
-    // Antrean dapur: segarkan otomatis tiap 30 detik.
-    _autoRefresh = Timer.periodic(const Duration(seconds: 30), (_) {
+    // Antrean dapur: segarkan otomatis tiap 8 detik.
+    _autoRefresh = Timer.periodic(const Duration(seconds: 8), (_) {
       if (mounted && !_loading) _load(reset: true);
     });
   }
@@ -51,7 +64,49 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
   @override
   void dispose() {
     _autoRefresh?.cancel();
+    _flashTimer?.cancel();
     super.dispose();
+  }
+
+  /// Alert pesanan baru: getar berat 3x + banner merah berkedip 6 detik
+  /// + snackbar tegas. Dipanggil sekali per pesanan PAID baru.
+  void _alertNewOrder(Order order) {
+    _lastNewOrder = order.orderNumber;
+    HapticFeedback.heavyImpact();
+    Future.delayed(const Duration(milliseconds: 350), () {
+      if (mounted) HapticFeedback.heavyImpact();
+    });
+    Future.delayed(const Duration(milliseconds: 700), () {
+      if (mounted) HapticFeedback.heavyImpact();
+    });
+    _flashTimer?.cancel();
+    setState(() {
+      _newOrderFlash = true;
+      _flashOn = true;
+    });
+    var ticks = 0;
+    _flashTimer = Timer.periodic(const Duration(milliseconds: 500), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      ticks++;
+      if (ticks > 12) {
+        t.cancel();
+        setState(() => _newOrderFlash = false);
+        return;
+      }
+      setState(() => _flashOn = !_flashOn);
+    });
+    showSnack(context, '🔔 PESANAN BARU MASUK: ${order.orderNumber}');
+  }
+
+  /// Pesanan PAID yang belum pernah terlihat sejak layar dibuka.
+  List<Order> _newPaidOrders(List<Order> orders) {
+    if (!_firstLoadDone) return const [];
+    return orders
+        .where((o) => o.status == 'paid' && !_seenPaidIds.contains(o.id))
+        .toList();
   }
 
   Future<void> _load({required bool reset}) async {
@@ -74,12 +129,24 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
       if (_statusFilter != null) {
         items = items.where((o) => o.status == _statusFilter).toList();
       }
+      final fresh = _newPaidOrders(items);
+      for (final o in items) {
+        if (o.status == 'paid') _seenPaidIds.add(o.id);
+      }
+      final isFirst = !_firstLoadDone;
+      _firstLoadDone = true;
       setState(() {
         _totalPages = result.totalPages;
         _orders = reset ? items : [..._orders, ...items];
         _loading = false;
         _loadingMore = false;
       });
+      // Alert hanya untuk pesanan baru setelah load pertama.
+      if (!isFirst) {
+        for (final o in fresh) {
+          _alertNewOrder(o);
+        }
+      }
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -158,12 +225,52 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
   /// Label tombol aksi cepat sesuai alur dapur.
   String _actionLabel(String current, String target) {
     if (current == 'paid' && target == 'processing') {
-      return 'TERIMA & PROSES';
+      return 'PROSES PESANAN';
+    }
+    if (current == 'processing' && target == 'shipped') {
+      return 'SIAP DIAMBIL / KIRIM';
     }
     if (current == 'shipped' && target == 'completed') {
-      return 'SELESAIKAN PESANAN';
+      return 'PESANAN SELESAI';
     }
     return '→ ${AppTheme.statusLabel(target)}';
+  }
+
+  /// Dialog struk thermal: teks struk + tombol salin (untuk ditempel ke
+  /// printer thermal / WhatsApp). Tanpa package print tambahan.
+  Future<void> _showReceipt(Order order) async {
+    final cashier = context.read<AuthState>().user?.name;
+    final text = receiptText(order, cashierName: cashier);
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('STRUK THERMAL'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            text,
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              Navigator.of(context).pop();
+              showSnack(context, 'Struk disalin — tempel ke printer/WA');
+            },
+            child: const Text('SALIN STRUK'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('TUTUP'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -171,6 +278,26 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
     return Scaffold(
       body: Column(
         children: [
+          if (_newOrderFlash)
+            GestureDetector(
+              onTap: () => setState(() => _newOrderFlash = false),
+              child: Container(
+                width: double.infinity,
+                color: _flashOn ? AppTheme.badRed : AppTheme.pureBlack,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Text(
+                  '🔔 PESANAN BARU MASUK: $_lastNewOrder',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 15,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: SizedBox(
@@ -313,6 +440,48 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
                                             fontWeight: FontWeight.w900,
                                             fontSize: 16,
                                           ),
+                                        ),
+                                        // Detail varian/modifier per item.
+                                        for (final item in order.items)
+                                          if (item.modifiersLabel.isNotEmpty)
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 2,
+                                              ),
+                                              child: Text(
+                                                '• ${item.productName} x${item.quantity}: ${item.modifiersLabel}',
+                                                style: const TextStyle(
+                                                  fontWeight: FontWeight.w700,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ),
+                                        if (order.voucherCode.isNotEmpty)
+                                          Padding(
+                                            padding:
+                                                const EdgeInsets.only(top: 2),
+                                            child: Text(
+                                              'VOUCHER: ${order.voucherCode} (-${formatRupiah(order.discountAmount)})',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w900,
+                                                fontSize: 12,
+                                                color: AppTheme.okGreen,
+                                              ),
+                                            ),
+                                          ),
+                                        const SizedBox(height: 10),
+                                        Row(
+                                          children: [
+                                            Expanded(
+                                              child: BrutalButton(
+                                                label: 'CETAK STRUK',
+                                                icon: Icons.print,
+                                                primary: false,
+                                                onPressed: () =>
+                                                    _showReceipt(order),
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                         if (order.status == 'pending') ...[
                                           const SizedBox(height: 10),

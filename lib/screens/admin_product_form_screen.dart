@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../theme.dart';
 import '../utils.dart';
 import '../widgets.dart';
 
@@ -33,8 +35,10 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
   String? _categoryId;
   bool _isActive = true;
   bool _saving = false;
+  bool _uploading = false;
   bool _loadingCats = true;
   List<Category> _categories = [];
+  List<ModifierGroup> _modifiers = [];
 
   bool get _isEdit => widget.product != null;
 
@@ -53,6 +57,7 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
       _weightController.text = '${p.weightGram}';
       _categoryId = p.categoryId;
       _isActive = p.isActive;
+      _modifiers = List.of(p.modifiers);
     }
     _loadCategories();
   }
@@ -86,6 +91,37 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
     }
   }
 
+  Future<void> _pickAndUpload() async {
+    final api = context.read<ApiClient>();
+    // Pemilih gambar sistem (photo picker Android) — tanpa file_picker:
+    // file_picker 8.x mem-pin AGP 7.4.2 di buildscript-nya, tak tersedia
+    // di repo Maven offline VM (hanya AGP 8.11.1/8.13.1/9.1.0) sehingga
+    // build Gradle gagal. image_picker_android mem-pin AGP 8.13.1.
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 2048,
+      maxHeight: 2048,
+      imageQuality: 90,
+    );
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    if (bytes.length > 5 * 1024 * 1024) {
+      if (mounted) showSnack(context, 'Ukuran file maksimal 5MB', isError: true);
+      return;
+    }
+    setState(() => _uploading = true);
+    try {
+      final url = await api.uploadImage(bytes, picked.name);
+      if (!mounted) return;
+      setState(() => _imageController.text = url);
+      showSnack(context, 'Foto berhasil diunggah');
+    } on ApiException catch (e) {
+      if (mounted) showSnack(context, e.message, isError: true);
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     if (_categoryId == null) {
@@ -107,6 +143,7 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
       imageUrl: _imageController.text.trim(),
       weightGram: int.tryParse(_weightController.text.trim()) ?? 0,
       isActive: _isActive,
+      modifiers: _modifiers,
     );
     setState(() => _saving = true);
     try {
@@ -133,6 +170,28 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
   String? _required(String? v, String field) {
     if (v == null || v.trim().isEmpty) return '$field wajib diisi';
     return null;
+  }
+
+  void _updateOption(
+    int gi,
+    int oi, {
+    String? name,
+    int? priceDelta,
+    int? costDelta,
+  }) {
+    final g = _modifiers[gi];
+    final o = g.options[oi];
+    final opts = List<ModifierOption>.of(g.options);
+    opts[oi] = ModifierOption(
+      name: name ?? o.name,
+      priceDelta: priceDelta ?? o.priceDelta,
+      costDelta: costDelta ?? o.costDelta,
+    );
+    _modifiers[gi] = ModifierGroup(
+      name: g.name,
+      type: g.type,
+      options: opts,
+    );
   }
 
   @override
@@ -242,6 +301,212 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
                 ],
               ),
               const SizedBox(height: 14),
+              const SectionTitle(title: 'Varian / Add-On'),
+              const SizedBox(height: 8),
+              Text(
+                'Varian tersimpan ke modifiers_json produk. '
+                'Harga & HPP add-on ikut dihitung di struk dan profit.',
+                style: TextStyle(
+                  color: AppTheme.mutedOf(context),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: BrutalButton(
+                      label: 'PAKAI VARIAN BAWAAN',
+                      primary: false,
+                      icon: Icons.auto_awesome,
+                      onPressed: () => setState(
+                        () => _modifiers = defaultModifiers(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: BrutalButton(
+                      label: 'TAMBAH GRUP',
+                      primary: false,
+                      icon: Icons.add,
+                      onPressed: () => setState(
+                        () => _modifiers = [
+                          ..._modifiers,
+                          const ModifierGroup(
+                            name: 'Grup Baru',
+                            type: 'single',
+                            options: [ModifierOption(name: 'Opsi 1')],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              for (var gi = 0; gi < _modifiers.length; gi++) ...[
+                const SizedBox(height: 12),
+                BrutalCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              initialValue: _modifiers[gi].name,
+                              decoration: const InputDecoration(
+                                labelText: 'NAMA GRUP',
+                              ),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                              ),
+                              onChanged: (v) {
+                                final g = _modifiers[gi];
+                                _modifiers[gi] = ModifierGroup(
+                                  name: v,
+                                  type: g.type,
+                                  options: g.options,
+                                );
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          DropdownButton<String>(
+                            value: _modifiers[gi].type,
+                            items: const [
+                              DropdownMenuItem(
+                                value: 'single',
+                                child: Text('PILIH 1'),
+                              ),
+                              DropdownMenuItem(
+                                value: 'multi',
+                                child: Text('BISA BANYAK'),
+                              ),
+                            ],
+                            onChanged: (v) {
+                              if (v == null) return;
+                              final g = _modifiers[gi];
+                              setState(
+                                () => _modifiers[gi] = ModifierGroup(
+                                  name: g.name,
+                                  type: v,
+                                  options: g.options,
+                                ),
+                              );
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              color: AppTheme.badRed,
+                            ),
+                            onPressed: () => setState(
+                              () => _modifiers.removeAt(gi),
+                            ),
+                            tooltip: 'Hapus grup',
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      for (var oi = 0;
+                          oi < _modifiers[gi].options.length;
+                          oi++)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                flex: 3,
+                                child: TextFormField(
+                                  initialValue:
+                                      _modifiers[gi].options[oi].name,
+                                  decoration: const InputDecoration(
+                                    labelText: 'OPSI',
+                                  ),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  onChanged: (v) =>
+                                      _updateOption(gi, oi, name: v),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                flex: 2,
+                                child: TextFormField(
+                                  initialValue:
+                                      '${_modifiers[gi].options[oi].priceDelta}',
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: '+HARGA',
+                                  ),
+                                  onChanged: (v) => _updateOption(
+                                    gi,
+                                    oi,
+                                    priceDelta: int.tryParse(v) ?? 0,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                flex: 2,
+                                child: TextFormField(
+                                  initialValue:
+                                      '${_modifiers[gi].options[oi].costDelta}',
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: '+HPP',
+                                  ),
+                                  onChanged: (v) => _updateOption(
+                                    gi,
+                                    oi,
+                                    costDelta: int.tryParse(v) ?? 0,
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.close, size: 18),
+                                onPressed: () => setState(
+                                  () {
+                                    final g = _modifiers[gi];
+                                    _modifiers[gi] = ModifierGroup(
+                                      name: g.name,
+                                      type: g.type,
+                                      options: List.of(g.options)
+                                        ..removeAt(oi),
+                                    );
+                                  },
+                                ),
+                                tooltip: 'Hapus opsi',
+                              ),
+                            ],
+                          ),
+                        ),
+                      BrutalButton(
+                        label: 'TAMBAH OPSI',
+                        primary: false,
+                        icon: Icons.add,
+                        onPressed: () => setState(
+                          () {
+                            final g = _modifiers[gi];
+                            _modifiers[gi] = ModifierGroup(
+                              name: g.name,
+                              type: g.type,
+                              options: [
+                                ...g.options,
+                                const ModifierOption(name: 'Opsi Baru'),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
               BrutalTextField(
                 controller: _descController,
                 label: 'Deskripsi',
@@ -252,6 +517,15 @@ class _AdminProductFormScreenState extends State<AdminProductFormScreen> {
                 controller: _imageController,
                 label: 'URL Gambar',
                 hint: 'https://... atau /uploads/xxx.png',
+              ),
+              const SizedBox(height: 10),
+              BrutalButton(
+                label: _uploading
+                    ? 'MENGUNGGAH...'
+                    : 'UPLOAD FOTO DARI PERANGKAT',
+                icon: Icons.upload,
+                loading: _uploading,
+                onPressed: _uploading ? null : _pickAndUpload,
               ),
               const SizedBox(height: 14),
               BrutalTextField(

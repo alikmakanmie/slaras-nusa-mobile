@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'config.dart';
@@ -389,6 +390,72 @@ class ApiClient {
 
   // ---------------- Admin: produk & kategori ----------------
 
+  /// Upload foto produk ke POST /upload (admin). Mengembalikan URL publik.
+  /// Ikut pola _send: fallback ke IP VPS bila base aktif gagal total,
+  /// refresh token sekali bila 401.
+  Future<String> uploadImage(List<int> bytes, String filename) async {
+    String subtype(String name) {
+      final lower = name.toLowerCase();
+      if (lower.endsWith('.png')) return 'png';
+      if (lower.endsWith('.webp')) return 'webp';
+      return 'jpeg';
+    }
+
+    Future<http.StreamedResponse> sendTo(String base) async {
+      final req = http.MultipartRequest('POST', Uri.parse('$base/upload'));
+      if (_accessToken != null && _accessToken!.isNotEmpty) {
+        req.headers['Authorization'] = 'Bearer $_accessToken';
+      }
+      req.files.add(http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: filename,
+        contentType: MediaType('image', subtype(filename)),
+      ));
+      return _http.send(req).timeout(const Duration(seconds: 60));
+    }
+
+    Future<String> handle(http.StreamedResponse streamed) async {
+      final res = await http.Response.fromStream(streamed);
+      final json = await _decode(res);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw ApiException(
+          json['error']?.toString() ?? 'Upload gagal (${res.statusCode})',
+          res.statusCode,
+        );
+      }
+      final url = (json['data'] as Map<String, dynamic>?)?['url']?.toString();
+      if (url == null || url.isEmpty) {
+        throw const ApiException(
+            'Upload gagal: server tidak mengembalikan URL');
+      }
+      return url;
+    }
+
+    try {
+      var streamed = await sendTo(_activeBaseUrl);
+      if (streamed.statusCode == 401 && _refreshToken != null) {
+        if (await _refresh()) streamed = await sendTo(_activeBaseUrl);
+      }
+      return await handle(streamed);
+    } catch (e) {
+      if (!_isTransportError(e)) rethrow;
+      if (_manualOverride == null &&
+          _activeBaseUrl != AppConfig.fallbackApiBaseUrl) {
+        try {
+          final streamed = await sendTo(AppConfig.fallbackApiBaseUrl);
+          _activeBaseUrl = AppConfig.fallbackApiBaseUrl;
+          _usingFallback = true;
+          return await handle(streamed);
+        } catch (e2) {
+          if (_isTransportError(e2)) throw _noConnection;
+          rethrow;
+        }
+      }
+      throw _noConnection;
+    }
+  }
+
   Future<Product> createProduct(Product product) async {
     final json = await requestJson(
       'POST',
@@ -405,6 +472,26 @@ class ApiClient {
       body: product.toRequestJson(),
     );
     return Product.fromJson(_data(json));
+  }
+
+  /// Toggle 1-klik Sold Out: PATCH /products/:id/availability
+  /// {is_available}. Mengembalikan status ketersediaan baru.
+  Future<bool> toggleProductAvailability(String id, bool available) async {
+    final json = await requestJson(
+      'PATCH',
+      '/products/$id/availability',
+      body: {'is_available': available},
+    );
+    final data = _data(json);
+    if (data.containsKey('is_available')) {
+      return parseBool(data['is_available'], available);
+    }
+    final product = data['product'];
+    if (product is Map<String, dynamic> &&
+        product.containsKey('is_available')) {
+      return parseBool(product['is_available'], available);
+    }
+    return available;
   }
 
   Future<void> deleteProduct(String id) async {
@@ -497,6 +584,85 @@ class ApiClient {
       query: query,
     );
     return ProfitAnalytics.fromJson(_data(json));
+  }
+
+  // ---------------- Admin: voucher promo ----------------
+
+  Future<List<Voucher>> listVouchers() async {
+    final json = await requestJson('GET', '/admin/vouchers');
+    return _dataList(json).map(Voucher.fromJson).toList();
+  }
+
+  Future<Voucher> createVoucher(Voucher voucher) async {
+    final json = await requestJson(
+      'POST',
+      '/admin/vouchers',
+      body: voucher.toRequestJson(),
+    );
+    return Voucher.fromJson(_data(json));
+  }
+
+  Future<Voucher> updateVoucher(String id, Voucher voucher) async {
+    final json = await requestJson(
+      'PUT',
+      '/admin/vouchers/$id',
+      body: voucher.toRequestJson(),
+    );
+    return Voucher.fromJson(_data(json));
+  }
+
+  Future<void> deleteVoucher(String id) async {
+    await requestJson('DELETE', '/admin/vouchers/$id');
+  }
+
+  /// Validasi voucher publik: POST /vouchers/validate
+  /// {code, subtotal} -> {valid, discount_amount, message}.
+  Future<({bool valid, int discountAmount, String message})>
+      validateVoucher(String code, int subtotal) async {
+    final json = await requestJson('POST', '/vouchers/validate',
+        body: {'code': code.toUpperCase(), 'subtotal': subtotal},
+        auth: false);
+    final data = _data(json);
+    return (
+      valid: parseBool(data['valid'], false),
+      discountAmount: parseInt(data['discount_amount']),
+      message: parseString(data['message']),
+    );
+  }
+
+  // ---------------- Publik: loyalitas & antrean ----------------
+
+  /// Cek stamp/poin pelanggan via nomor HP (dine-in/takeaway).
+  Future<LoyaltyInfo> getLoyalty(String phone) async {
+    final json = await requestJson(
+      'GET',
+      '/loyalty/${Uri.encodeComponent(phone)}',
+      auth: false,
+    );
+    return LoyaltyInfo.fromJson(_data(json));
+  }
+
+  /// Antrean hari ini (publik): pesanan processing + completed 30 mnt
+  /// terakhir. Bentuk data backend: List langsung, atau Map
+  /// {preparing:[...], ready:[...]}.
+  Future<({List<Order> preparing, List<Order> ready})> getOrderQueue() async {
+    final json = await requestJson('GET', '/orders/queue', auth: false);
+    final data = json['data'];
+    if (data is Map<String, dynamic>) {
+      List<Order> parseList(dynamic raw) {
+        if (raw is! List) return <Order>[];
+        return raw
+            .whereType<Map<String, dynamic>>()
+            .map(Order.fromJson)
+            .toList();
+      }
+
+      return (
+        preparing: parseList(data['preparing']),
+        ready: parseList(data['ready']),
+      );
+    }
+    return (preparing: _dataList(json).map(Order.fromJson).toList(), ready: <Order>[]);
   }
 
   // ---------------- Superadmin: manajemen user ----------------

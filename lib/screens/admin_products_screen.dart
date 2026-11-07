@@ -111,6 +111,30 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
     }
   }
 
+  Future<void> _toggleAvailability(Product p) async {
+    final next = !p.isAvailable;
+    final idx = _products.indexWhere((e) => e.id == p.id);
+    if (idx < 0) return;
+    final old = _products[idx];
+    setState(() => _products[idx] = p.copyWith(isAvailable: next));
+    try {
+      final confirmed =
+          await context.read<ApiClient>().toggleProductAvailability(p.id, next);
+      if (!mounted) return;
+      setState(() => _products[idx] = p.copyWith(isAvailable: confirmed));
+      showSnack(
+        context,
+        confirmed
+            ? '"${p.name}" TERSEDIA'
+            : '"${p.name}" HABIS HARI INI',
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _products[idx] = old);
+      showSnack(context, e.message, isError: true);
+    }
+  }
+
   Future<void> _openForm({Product? product}) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -252,6 +276,42 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
                                                   fontSize: 12,
                                                 ),
                                               ),
+                                              if (!p.isAvailable)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                    top: 4,
+                                                  ),
+                                                  child: Container(
+                                                    decoration:
+                                                        const BoxDecoration(
+                                                      color: AppTheme.badRed,
+                                                      border: Border.fromBorderSide(
+                                                        BorderSide(
+                                                          color: AppTheme
+                                                              .pureBlack,
+                                                          width: 2,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    padding:
+                                                        const EdgeInsets
+                                                            .symmetric(
+                                                      horizontal: 8,
+                                                      vertical: 3,
+                                                    ),
+                                                    child: const Text(
+                                                      'HABIS HARI INI / SOLD OUT',
+                                                      style: TextStyle(
+                                                        color: Colors.white,
+                                                        fontWeight:
+                                                            FontWeight.w900,
+                                                        fontSize: 11,
+                                                        letterSpacing: 1,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
                                               const SizedBox(height: 8),
                                               Row(
                                                 children: [
@@ -275,6 +335,34 @@ class _AdminProductsScreenState extends State<AdminProductsScreen> {
                                                       p,
                                                       v - p.stock,
                                                     ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                children: [
+                                                  Expanded(
+                                                    child: Text(
+                                                      p.isAvailable
+                                                          ? 'TERSEDIA'
+                                                          : 'HABIS HARI INI',
+                                                      style: TextStyle(
+                                                        fontWeight:
+                                                            FontWeight.w900,
+                                                        fontSize: 11,
+                                                        letterSpacing: 1,
+                                                        color: p.isAvailable
+                                                            ? AppTheme.okGreen
+                                                            : AppTheme.badRed,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  Switch(
+                                                    value: p.isAvailable,
+                                                    activeThumbColor:
+                                                        AppTheme.okGreen,
+                                                    onChanged: (_) =>
+                                                        _toggleAvailability(p),
                                                   ),
                                                 ],
                                               ),
